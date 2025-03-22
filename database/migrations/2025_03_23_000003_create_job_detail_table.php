@@ -18,12 +18,14 @@ return new class extends Migration
             $table->string('location')->nullable();
             $table->date('open_date')->nullable();
             $table->foreignId('job_type_id');
+            $table->foreignId('company_id');
             $table->enum('time_type', ['full_time', 'part_time']);
             $table->integer('number_of_applicants')->default(0);
             $table->string('job_description_link')->nullable();
             $table->timestamps();
 
             $table->foreign('job_type_id')->references('id')->on('jobs_types');
+            $table->foreign('company_id')->references('id')->on('company');
 
         });
     }
