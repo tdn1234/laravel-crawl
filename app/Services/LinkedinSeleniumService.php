@@ -328,14 +328,44 @@ class LinkedinSeleniumService
                 }
             }
             
-            $company = Company::updateOrCreate(
-                ['company_name' => $companyName],
-                [
-                    'industry_id' => $industry->id,
-                    'employee_number' => $employeeCount,
-                    'open_jobs' => $jobCount
-                ]
-            );
+            try {
+                // Try to create or update the company using both name and industry
+                $company = Company::updateOrCreate(
+                    [
+                        'company_name' => $companyName,
+                        'industry_id' => $industry->id
+                    ],
+                    [
+                        'employee_number' => $employeeCount,
+                        'open_jobs' => $jobCount
+                    ]
+                );
+                
+                if ($company->wasRecentlyCreated) {
+                    Log::info("Created new company: " . $companyName . " in industry: " . $industry->industry_name);
+                } else {
+                    Log::info("Updated existing company: " . $companyName . " in industry: " . $industry->industry_name);
+                }
+            } catch (\Illuminate\Database\QueryException $e) {
+                // Handle any exceptions
+                Log::error("Database error when saving company: " . $e->getMessage());
+                
+                // You can still try to recover in case of an error
+                if ($e->errorInfo[1] == 1062) { // MySQL duplicate entry error code
+                    $company = Company::where('company_name', $companyName)
+                                     ->where('industry_id', $industry->id)
+                                     ->first();
+                                     
+                    if ($company) {
+                        $company->employee_number = $employeeCount;
+                        $company->open_jobs = $jobCount;
+                        $company->save();
+                        Log::info("Manually updated existing company after error: " . $companyName);
+                    }
+                } else {
+                    throw $e;
+                }
+            }
             
             Log::info("Saved company to database: " . $companyName);
             
