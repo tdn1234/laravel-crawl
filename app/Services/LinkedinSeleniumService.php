@@ -137,106 +137,170 @@ class LinkedinSeleniumService
      * Process company results from the current page
      */
     protected function processCompanyResults()
-{
-    // Using XPath with stable attributes instead of class names
-    $companyElements = $this->driver->findElements(
-        WebDriverBy::xpath("//li[.//a[contains(@href, '/company/')]]")
-    );
-    
-    // Fallback using the list structure within cards
-    if (count($companyElements) == 0) {
+    {
+        // Using XPath with stable attributes instead of class names
         $companyElements = $this->driver->findElements(
-            WebDriverBy::xpath("//div[contains(@class, 'artdeco-card')]//ul/li")
+            WebDriverBy::xpath("//li[.//a[contains(@href, '/company/')]]")
         );
+        
+        // Fallback using the list structure within cards
+        if (count($companyElements) == 0) {
+            $companyElements = $this->driver->findElements(
+                WebDriverBy::xpath("//div[contains(@class, 'artdeco-card')]//ul/li")
+            );
+        }
+        
+        $count = 0;
+        
+        foreach ($companyElements as $element) {
+            try {
+                // Skip the feedback card
+                $helpfulElements = $element->findElements(
+                    WebDriverBy::xpath('.//*[contains(text(), "Are these results helpful?")]')
+                );
+                if (count($helpfulElements) > 0) {
+                    continue;
+                }
+                
+                // Extract company URL - focus on getting a valid URL rather than the name at this stage
+                $companyLinkElements = $element->findElements(
+                    WebDriverBy::xpath(".//a[contains(@href, '/company/') and not(contains(@href, '/setup/new'))]")
+                );
+                
+                if (count($companyLinkElements) == 0) {
+                    continue; // Skip if no valid company link found
+                }
+                
+                $companyLinkElement = $companyLinkElements[0];
+                $companyUrl = $companyLinkElement->getAttribute('href');
+                
+                // Additional validation of the URL
+                if (!preg_match('/\/company\/[a-zA-Z0-9\-]+\/?$/', $companyUrl)) {
+                    // This doesn't look like a normal company page URL
+                    Log::warning("Skipping suspicious company URL: " . $companyUrl);
+                    continue;
+                }
+                
+                // Log the URL we're about to visit
+                Log::info("Opening company URL: " . $companyUrl);
+                
+                // Open in new tab using JavaScript
+                $this->driver->executeScript("window.open(arguments[0], '_blank');", [$companyUrl]);
+                
+                // Wait for the new tab to open
+                $this->driver->wait(10)->until(
+                    function () {
+                        return count($this->driver->getWindowHandles()) > 1;
+                    }
+                );
+                
+                // Switch to the new tab
+                $tabs = $this->driver->getWindowHandles();
+                $this->driver->switchTo()->window(end($tabs));
+                
+                // Wait for the company page to load
+                $this->wait->until(
+                    WebDriverExpectedCondition::presenceOfElementLocated(
+                        WebDriverBy::xpath("//div[contains(@class, 'org-top-card')]")
+                    )
+                );
+                
+                // Extract company data from the details page
+                $companyData = $this->extractCompanyData();
+                
+                // If the extraction was successful
+                if (!empty($companyData['name'])) {
+                    // Save company to database
+                    $company = $this->saveCompanyData($companyData);
+                    
+                    // Process jobs if there are any jobs listed
+                    if ($companyData['job_count'] > 0) {
+                        $jobTabElements = $this->driver->findElements(
+                            WebDriverBy::xpath('//a[contains(@href, "/jobs") or contains(text(), "jobs")]')
+                        );
+                        
+                        if (count($jobTabElements) > 0) {
+                            Log::info("Navigating to jobs tab for " . $companyData['name']);
+                            $jobTabElements[0]->click();
+                            $this->processJobs($company);
+                        }
+                    }
+                    
+                    // Process company staff
+                    $this->processCompanyStaff($company);
+                    
+                    $count++;
+                }
+                
+                // Close the company tab and switch back to search results
+                $this->driver->close();
+                $this->driver->switchTo()->window($tabs[0]);
+                
+                // Add a random delay between processing companies
+                sleep(rand(3, 7));
+            } catch (\Exception $e) {
+                Log::warning("Error processing company: " . $e->getMessage());
+                
+                // Try to close any extra tabs and get back to search results
+                $tabs = $this->driver->getWindowHandles();
+                if (count($tabs) > 1) {
+                    $this->driver->switchTo()->window(end($tabs));
+                    $this->driver->close();
+                    $this->driver->switchTo()->window($tabs[0]);
+                }
+                
+                continue;
+            }
+        }
+        
+        return $count;
     }
     
-    $count = 0;
-    
-    foreach ($companyElements as $element) {
+    /**
+     * Extract company data from the details page
+     * 
+     * @return array Company data including name, industry, employee count, etc.
+     */
+    protected function extractCompanyData()
+    {
+        $companyData = [
+            'name' => '',
+            'industry' => 'Unknown',
+            'employee_count' => null,
+            'job_count' => 0,
+            'follower_count' => null
+        ];
+        
         try {
-            // Skip the feedback card
-            $helpfulElements = $element->findElements(
-                WebDriverBy::xpath('.//*[contains(text(), "Are these results helpful?")]')
-            );
-            if (count($helpfulElements) > 0) {
-                continue;
-            }
-            
-            // Extract company URL - focus on getting a valid URL rather than the name at this stage
-            $companyLinkElements = $element->findElements(
-                WebDriverBy::xpath(".//a[contains(@href, '/company/') and not(contains(@href, '/setup/new'))]")
-            );
-            
-            if (count($companyLinkElements) == 0) {
-                continue; // Skip if no valid company link found
-            }
-            
-            $companyLinkElement = $companyLinkElements[0];
-            $companyUrl = $companyLinkElement->getAttribute('href');
-            
-            // Additional validation of the URL
-            if (!preg_match('/\/company\/[a-zA-Z0-9\-]+\/?$/', $companyUrl)) {
-                // This doesn't look like a normal company page URL
-                Log::warning("Skipping suspicious company URL: " . $companyUrl);
-                continue;
-            }
-            
-            // Log the URL we're about to visit
-            Log::info("Opening company URL: " . $companyUrl);
-            
-            // Open in new tab using JavaScript
-            $this->driver->executeScript("window.open(arguments[0], '_blank');", [$companyUrl]);
-            
-            // Wait for the new tab to open
-            $this->driver->wait(10)->until(
-                function () {
-                    return count($this->driver->getWindowHandles()) > 1;
-                }
-            );
-            
-            // Switch to the new tab
-            $tabs = $this->driver->getWindowHandles();
-            $this->driver->switchTo()->window(end($tabs));
-            
-            // Wait for the company page to load
-            $this->wait->until(
-                WebDriverExpectedCondition::presenceOfElementLocated(
-                    WebDriverBy::xpath("//div[contains(@class, 'org-top-card')]")
-                )
-            );
-            
-            // Now extract data from the company details page
             // Company name - based on the provided HTML structure
-            $companyName = "";
             $companyNameElements = $this->driver->findElements(
                 WebDriverBy::xpath("//h1[contains(@class, 'org-top-card-summary__title')]")
             );
             
             if (count($companyNameElements) > 0) {
-                $companyName = trim($companyNameElements[0]->getText());
-                Log::info("Extracted company name from details page: " . $companyName);
+                $companyData['name'] = trim($companyNameElements[0]->getText());
+                Log::info("Extracted company name from details page: " . $companyData['name']);
             } else {
                 // Fallback to URL if we can't find the name
+                $companyUrl = $this->driver->getCurrentURL();
                 if (preg_match('/\/company\/([^\/]+)/', $companyUrl, $matches)) {
-                    $companyName = str_replace('-', ' ', $matches[1]);
-                    $companyName = ucwords($companyName);
-                    Log::info("Using company name from URL: " . $companyName);
+                    $companyData['name'] = str_replace('-', ' ', $matches[1]);
+                    $companyData['name'] = ucwords($companyData['name']);
+                    Log::info("Using company name from URL: " . $companyData['name']);
                 }
             }
             
             // Industry - based on the provided HTML structure
-            $industryName = "Unknown";
             $industryElements = $this->driver->findElements(
                 WebDriverBy::xpath("//div[contains(@class, 'org-top-card-summary-info-list__info-item')][1]")
             );
             
             if (count($industryElements) > 0) {
-                $industryName = trim($industryElements[0]->getText());
-                Log::info("Extracted industry from details page: " . $industryName);
+                $companyData['industry'] = trim($industryElements[0]->getText());
+                Log::info("Extracted industry from details page: " . $companyData['industry']);
             }
             
             // Employee count - based on the provided HTML structure
-            $employeeCount = null;
             $employeeElements = $this->driver->findElements(
                 WebDriverBy::xpath("//a[contains(@href, 'currentCompany') or contains(@class, 'org-top-card-summary-info-list__info-item')][contains(., 'employee')]")
             );
@@ -246,7 +310,6 @@ class LinkedinSeleniumService
                 Log::info("Found employee text: " . $employeeText);
                 
                 // Parse different employee count formats
-                // Format examples: "501-1K employees", "23 employees", "2.3K employees"
                 if (preg_match('/([0-9,.]+K?)-([0-9,.]+K?)|([0-9,.]+K?)\s+employees/', $employeeText, $matches)) {
                     // Handle range format like "501-1K"
                     if (isset($matches[2])) {
@@ -255,7 +318,7 @@ class LinkedinSeleniumService
                         if (strpos($upper, 'K') !== false) {
                             $upper = (float) str_replace('K', '', $upper) * 1000;
                         }
-                        $employeeCount = (int) $upper;
+                        $companyData['employee_count'] = (int) $upper;
                     } 
                     // Handle single value format like "23 employees" or "2.3K employees"
                     else if (isset($matches[3])) {
@@ -264,15 +327,14 @@ class LinkedinSeleniumService
                         if (strpos($count, 'K') !== false) {
                             $count = (float) str_replace('K', '', $count) * 1000;
                         }
-                        $employeeCount = (int) $count;
+                        $companyData['employee_count'] = (int) $count;
                     }
                     
-                    Log::info("Parsed employee count: " . $employeeCount);
+                    Log::info("Parsed employee count: " . $companyData['employee_count']);
                 }
             }
             
             // Follower count
-            $followerCount = null;
             $followerElements = $this->driver->findElements(
                 WebDriverBy::xpath("//div[contains(@class, 'org-top-card-summary-info-list__info-item')][contains(., 'followers')]")
             );
@@ -288,13 +350,12 @@ class LinkedinSeleniumService
                     if (strpos($count, 'K') !== false) {
                         $count = (float) str_replace('K', '', $count) * 1000;
                     }
-                    $followerCount = (int) $count;
-                    Log::info("Parsed follower count: " . $followerCount);
+                    $companyData['follower_count'] = (int) $count;
+                    Log::info("Parsed follower count: " . $companyData['follower_count']);
                 }
             }
             
             // Get job count - might need to visit the jobs tab
-            $jobCount = 0;
             $jobElements = $this->driver->findElements(
                 WebDriverBy::xpath("//a[contains(@href, '/jobs') and (contains(., 'job') or contains(., 'Job'))]")
             );
@@ -304,106 +365,82 @@ class LinkedinSeleniumService
                 // Look for numbers followed by "jobs"
                 preg_match('/([0-9,.]+)\s+jobs?/i', $jobText, $matches);
                 if (isset($matches[1])) {
-                    $jobCount = (int)str_replace(',', '', $matches[1]);
-                    Log::info("Found job count from link text: " . $jobCount);
+                    $companyData['job_count'] = (int)str_replace(',', '', $matches[1]);
+                    Log::info("Found job count from link text: " . $companyData['job_count']);
                 }
             }
-            
-            // If company name is still empty, this is a problem
-            if (empty($companyName)) {
-                throw new \Exception("Unable to extract company name from details page");
-            }
-            
-            // Save the company to the database
-            try {
-                $industry = Industry::firstOrCreate(['industry_name' => $industryName]);
-            } catch (\Illuminate\Database\QueryException $e) {
-                // This catches unique constraint violations
-                if ($e->errorInfo[1] == 1062) { // MySQL duplicate entry error code
-                    // Get the existing record
-                    $industry = Industry::where('industry_name', $industryName)->first();
-                    Log::warning("Duplicate industry attempted: " . $industryName);
-                } else {
-                    throw $e; // Re-throw if it's a different error
-                }
-            }
-            
-            try {
-                // Try to create or update the company using both name and industry
-                $company = Company::updateOrCreate(
-                    [
-                        'company_name' => $companyName,
-                        'industry_id' => $industry->id
-                    ],
-                    [
-                        'employee_number' => $employeeCount,
-                        'open_jobs' => $jobCount
-                    ]
-                );
-                
-                if ($company->wasRecentlyCreated) {
-                    Log::info("Created new company: " . $companyName . " in industry: " . $industry->industry_name);
-                } else {
-                    Log::info("Updated existing company: " . $companyName . " in industry: " . $industry->industry_name);
-                }
-            } catch (\Illuminate\Database\QueryException $e) {
-                // Handle any exceptions
-                Log::error("Database error when saving company: " . $e->getMessage());
-                
-                // You can still try to recover in case of an error
-                if ($e->errorInfo[1] == 1062) { // MySQL duplicate entry error code
-                    $company = Company::where('company_name', $companyName)
-                                     ->where('industry_id', $industry->id)
-                                     ->first();
-                                     
-                    if ($company) {
-                        $company->employee_number = $employeeCount;
-                        $company->open_jobs = $jobCount;
-                        $company->save();
-                        Log::info("Manually updated existing company after error: " . $companyName);
-                    }
-                } else {
-                    throw $e;
-                }
-            }
-            
-            Log::info("Saved company to database: " . $companyName);
-            
-            // Process jobs if there are any jobs listed
-            if (count($jobElements) > 0 && $jobCount > 0) {
-                Log::info("Navigating to jobs tab for " . $companyName);
-                $jobElements[0]->click();
-                $this->processJobs($company);
-            }
-            
-            // Process company staff
-            $this->processCompanyStaff($company);
-            
-            // Close the company tab and switch back to search results
-            $this->driver->close();
-            $this->driver->switchTo()->window($tabs[0]);
-            
-            $count++;
-            
-            // Add a random delay between processing companies
-            sleep(rand(3, 7));
         } catch (\Exception $e) {
-            Log::warning("Error processing company: " . $e->getMessage());
-            
-            // Try to close any extra tabs and get back to search results
-            $tabs = $this->driver->getWindowHandles();
-            if (count($tabs) > 1) {
-                $this->driver->switchTo()->window(end($tabs));
-                $this->driver->close();
-                $this->driver->switchTo()->window($tabs[0]);
-            }
-            
-            continue;
+            Log::error("Error extracting company data: " . $e->getMessage());
         }
+        
+        return $companyData;
     }
     
-    return $count;
-}
+    /**
+     * Save company data to database
+     * 
+     * @param array $companyData Company data from extraction
+     * @return Company The saved company model
+     */
+    protected function saveCompanyData($companyData)
+    {
+        // First, get or create the industry
+        try {
+            $industry = Industry::firstOrCreate(['industry_name' => $companyData['industry']]);
+            
+            if ($industry->wasRecentlyCreated) {
+                Log::info("Created new industry: " . $companyData['industry']);
+            } else {
+                Log::info("Using existing industry: " . $companyData['industry'] . " (ID: " . $industry->id . ")");
+            }
+        } catch (\Exception $e) {
+            Log::error("Error handling industry: " . $e->getMessage());
+            // Create a fallback industry if needed
+            $industry = Industry::firstOrCreate(['industry_name' => 'Unknown']);
+        }
+        
+        // Now create or update the company using composite key
+        try {
+            $company = Company::updateOrCreate(
+                [
+                    'company_name' => $companyData['name'],
+                    'industry_id' => $industry->id
+                ],
+                [
+                    'employee_number' => $companyData['employee_count'],
+                    'open_jobs' => $companyData['job_count']
+                ]
+            );
+            
+            if ($company->wasRecentlyCreated) {
+                Log::info("Created new company: " . $companyData['name'] . " in industry: " . $industry->industry_name);
+            } else {
+                Log::info("Updated existing company: " . $companyData['name'] . " in industry: " . $industry->industry_name);
+            }
+            
+            return $company;
+        } catch (\Illuminate\Database\QueryException $e) {
+            Log::error("Database error when saving company: " . $e->getMessage());
+            
+            // Try to recover if it's a duplicate entry error
+            if ($e->errorInfo[1] == 1062) { // MySQL duplicate entry error code
+                $company = Company::where('company_name', $companyData['name'])
+                                ->where('industry_id', $industry->id)
+                                ->first();
+                                
+                if ($company) {
+                    $company->employee_number = $companyData['employee_count'];
+                    $company->open_jobs = $companyData['job_count'];
+                    $company->save();
+                    Log::info("Manually updated existing company after error: " . $companyData['name']);
+                    return $company;
+                }
+            }
+            
+            // If recovery failed, throw the error
+            throw $e;
+        }
+    }
     
     /**
      * Process company staff
@@ -433,41 +470,11 @@ class LinkedinSeleniumService
                 
                 foreach ($staffElements as $element) {
                     try {
-                        // Get name from various elements that might contain it
-                        $nameElement = null;
-                        $potentialNameElements = $element->findElements(
-                            WebDriverBy::xpath('.//div[contains(@class, "title") or contains(@class, "name")]')
-                        );
+                        $staffData = $this->extractStaffData($element);
                         
-                        foreach ($potentialNameElements as $potential) {
-                            $text = $potential->getText();
-                            if (!empty(trim($text))) {
-                                $nameElement = $potential;
-                                break;
-                            }
+                        if (!empty($staffData['name']) && !empty($staffData['link'])) {
+                            $this->saveStaffData($company, $staffData);
                         }
-                        
-                        if (!$nameElement) {
-                            continue;
-                        }
-                        
-                        $name = $nameElement->getText();
-                        
-                        // Look for profile links
-                        $linkElement = $element->findElement(
-                            WebDriverBy::xpath('.//a[contains(@href, "/in/")]')
-                        );
-                        $link = $linkElement->getAttribute('href');
-                        
-                        CompanyStaff::updateOrCreate(
-                            [
-                                'company_id' => $company->id,
-                                'full_name' => $name
-                            ],
-                            [
-                                'contact_link' => $link
-                            ]
-                        );
                     } catch (\Exception $e) {
                         continue;
                     }
@@ -475,6 +482,88 @@ class LinkedinSeleniumService
             }
         } catch (\Exception $e) {
             Log::warning("Error processing staff for company {$company->company_name}: " . $e->getMessage());
+        }
+    }
+    
+    /**
+     * Extract staff data from profile card element
+     * 
+     * @param \Facebook\WebDriver\Remote\RemoteWebElement $element
+     * @return array Staff data
+     */
+    protected function extractStaffData($element)
+    {
+        $staffData = [
+            'name' => '',
+            'link' => '',
+            'title' => '',
+        ];
+        
+        // Get name from various elements that might contain it
+        $nameElement = null;
+        $potentialNameElements = $element->findElements(
+            WebDriverBy::xpath('.//div[contains(@class, "title") or contains(@class, "name")]')
+        );
+        
+        foreach ($potentialNameElements as $potential) {
+            $text = $potential->getText();
+            if (!empty(trim($text))) {
+                $staffData['name'] = trim($text);
+                break;
+            }
+        }
+        
+        // Look for profile links
+        $linkElements = $element->findElements(
+            WebDriverBy::xpath('.//a[contains(@href, "/in/")]')
+        );
+        
+        if (count($linkElements) > 0) {
+            $staffData['link'] = $linkElements[0]->getAttribute('href');
+        }
+        
+        // Try to get job title if available
+        $titleElements = $element->findElements(
+            WebDriverBy::xpath('.//div[contains(@class, "subtitle") or contains(@class, "secondary")]')
+        );
+        
+        if (count($titleElements) > 0) {
+            $staffData['title'] = trim($titleElements[0]->getText());
+        }
+        
+        return $staffData;
+    }
+    
+    /**
+     * Save staff data to database
+     * 
+     * @param Company $company
+     * @param array $staffData
+     * @return CompanyStaff
+     */
+    protected function saveStaffData($company, $staffData)
+    {
+        try {
+            $staff = CompanyStaff::updateOrCreate(
+                [
+                    'company_id' => $company->id,
+                    'full_name' => $staffData['name']
+                ],
+                [
+                    'contact_link' => $staffData['link']
+                ]
+            );
+            
+            if ($staff->wasRecentlyCreated) {
+                Log::info("Created new staff member: " . $staffData['name'] . " for company: " . $company->company_name);
+            } else {
+                Log::info("Updated existing staff member: " . $staffData['name'] . " for company: " . $company->company_name);
+            }
+            
+            return $staff;
+        } catch (\Exception $e) {
+            Log::warning("Error saving staff data: " . $e->getMessage());
+            return null;
         }
     }
     
@@ -498,79 +587,125 @@ class LinkedinSeleniumService
             
             foreach ($jobElements as $element) {
                 try {
-                    // Extract job title - look for headings or links to job posts
-                    $titleElement = $element->findElement(
-                        WebDriverBy::xpath('.//a[contains(@href, "/jobs/view/") or contains(@class, "job-title")] | .//h3')
-                    );
-                    $jobTitle = $titleElement->getText();
+                    $jobData = $this->extractJobData($element);
                     
-                    // Extract location - typically in small text near the title
-                    $location = '';
-                    $locationElements = $element->findElements(
-                        WebDriverBy::xpath('.//span[contains(@class, "location") or contains(@class, "metadata")]')
-                    );
-                    
-                    if (count($locationElements) > 0) {
-                        $location = $locationElements[0]->getText();
+                    if (!empty($jobData['title'])) {
+                        $this->saveJobData($company, $jobData);
                     }
-                    
-                    // Extract job type - could be in different positions
-                    $jobTypeText = 'Unknown';
-                    $jobTypeElements = $element->findElements(
-                        WebDriverBy::xpath('.//span[contains(text(), "Full-time") or contains(text(), "Part-time") or contains(text(), "Contract")]')
-                    );
-                    
-                    if (count($jobTypeElements) > 0) {
-                        $jobTypeText = $jobTypeElements[0]->getText();
-                    }
-                    
-                    // Determine time type (full-time or part-time)
-                    $timeType = 'full_time';
-                    if (stripos($jobTypeText, 'part-time') !== false) {
-                        $timeType = 'part_time';
-                    }
-                    
-                    // Extract applicant count if available
-                    $applicantCount = 0;
-                    $textNodes = $element->findElements(
-                        WebDriverBy::xpath('.//*[contains(text(), "applicant") or contains(text(), "application")]')
-                    );
-                    
-                    foreach ($textNodes as $node) {
-                        $text = $node->getText();
-                        preg_match('/([0-9,]+)/', $text, $matches);
-                        if (isset($matches[1])) {
-                            $applicantCount = (int) str_replace(',', '', $matches[1]);
-                            break;
-                        }
-                    }
-                    
-                    // Get job URL
-                    $jobUrl = $titleElement->getAttribute('href');
-                    
-                    // Find or create job type
-                    $jobType = JobType::firstOrCreate(['job_type' => $jobTypeText]);
-                    
-                    // Save the job
-                    JobDetail::updateOrCreate(
-                        [
-                            'job_name' => $jobTitle,
-                            'job_type_id' => $jobType->id
-                        ],
-                        [
-                            'location' => $location,
-                            'open_date' => now(),
-                            'time_type' => $timeType,
-                            'number_of_applicants' => $applicantCount,
-                            'job_description_link' => $jobUrl
-                        ]
-                    );
                 } catch (\Exception $e) {
                     continue;
                 }
             }
         } catch (\Exception $e) {
             Log::warning("Error processing jobs for company {$company->company_name}: " . $e->getMessage());
+        }
+    }
+    
+    /**
+     * Extract job data from job card element
+     * 
+     * @param \Facebook\WebDriver\Remote\RemoteWebElement $element
+     * @return array Job data
+     */
+    protected function extractJobData($element)
+    {
+        $jobData = [
+            'title' => '',
+            'location' => '',
+            'job_type' => 'Unknown',
+            'time_type' => 'full_time',
+            'applicant_count' => 0,
+            'url' => ''
+        ];
+        
+        // Extract job title - look for headings or links to job posts
+        $titleElements = $element->findElements(
+            WebDriverBy::xpath('.//a[contains(@href, "/jobs/view/") or contains(@class, "job-title")] | .//h3')
+        );
+        
+        if (count($titleElements) > 0) {
+            $jobData['title'] = trim($titleElements[0]->getText());
+            $jobData['url'] = $titleElements[0]->getAttribute('href');
+        }
+        
+        // Extract location - typically in small text near the title
+        $locationElements = $element->findElements(
+            WebDriverBy::xpath('.//span[contains(@class, "location") or contains(@class, "metadata")]')
+        );
+        
+        if (count($locationElements) > 0) {
+            $jobData['location'] = trim($locationElements[0]->getText());
+        }
+        
+        // Extract job type - could be in different positions
+        $jobTypeElements = $element->findElements(
+            WebDriverBy::xpath('.//span[contains(text(), "Full-time") or contains(text(), "Part-time") or contains(text(), "Contract")]')
+        );
+        
+        if (count($jobTypeElements) > 0) {
+            $jobData['job_type'] = trim($jobTypeElements[0]->getText());
+            
+            // Determine time type (full-time or part-time)
+            if (stripos($jobData['job_type'], 'part-time') !== false) {
+                $jobData['time_type'] = 'part_time';
+            }
+        }
+        
+        // Extract applicant count if available
+        $textNodes = $element->findElements(
+            WebDriverBy::xpath('.//*[contains(text(), "applicant") or contains(text(), "application")]')
+        );
+        
+        foreach ($textNodes as $node) {
+            $text = $node->getText();
+            preg_match('/([0-9,]+)/', $text, $matches);
+            if (isset($matches[1])) {
+                $jobData['applicant_count'] = (int) str_replace(',', '', $matches[1]);
+                break;
+            }
+        }
+        
+        return $jobData;
+    }
+    
+    /**
+     * Save job data to database
+     * 
+     * @param Company $company
+     * @param array $jobData
+     * @return JobDetail
+     */
+    protected function saveJobData($company, $jobData)
+    {
+        try {
+            // Find or create job type
+            $jobType = JobType::firstOrCreate(['job_type' => $jobData['job_type']]);
+            
+            // Save the job
+            $job = JobDetail::updateOrCreate(
+                [
+                    'job_name' => $jobData['title'],
+                    'job_type_id' => $jobType->id
+                ],
+                [
+                    'location' => $jobData['location'],
+                    'open_date' => now(),
+                    'time_type' => $jobData['time_type'],
+                    'number_of_applicants' => $jobData['applicant_count'],
+                    'job_description_link' => $jobData['url']
+                ]
+            );
+            
+            if ($job->wasRecentlyCreated) {
+                Log::info("Created new job: " . $jobData['title'] . " for company: " . $company->company_name);
+            } else {
+                Log::info("Updated existing job: " . $jobData['title'] . " for company: " . $company->company_name);
+            }
+            
+            return $job;
+        } catch (\Exception $e) {
+            Log::warning("Error saving job data: " . $e->getMessage());
+            return null;
         }
     }
     
