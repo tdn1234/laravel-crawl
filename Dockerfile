@@ -20,6 +20,27 @@ RUN apt-get update && apt-get install -y \
     libonig-dev \
     libicu-dev
 
+RUN apt-get update && apt-get install -y \
+    libglib2.0-0 \
+    libnss3 \
+    libx11-6 \
+    libx11-xcb1 \
+    libxcb1 \
+    libxcomposite1 \
+    libxcursor1 \
+    libxdamage1 \
+    libxext6 \
+    libxfixes3 \
+    libxi6 \
+    libxrandr2 \
+    libxrender1 \
+    libxss1 \
+    libxtst6 \
+    libgbm1 \
+    libasound2
+
+
+
 # Clear cache
 RUN apt-get clean && rm -rf /var/lib/apt/lists/*
 
@@ -43,7 +64,10 @@ RUN pecl install redis && docker-php-ext-enable redis
 
 # Copy application files
 COPY . /var/www
+
 COPY --chown=www:www . /var/www
+
+# COPY ./docker/chromedriver /usr/bin/chromedriver
 
 # Change current user to www
 USER www
