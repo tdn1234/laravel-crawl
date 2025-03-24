@@ -315,7 +315,18 @@ class LinkedinSeleniumService
             }
             
             // Save the company to the database
-            $industry = Industry::firstOrCreate(['industry_name' => $industryName]);
+            try {
+                $industry = Industry::firstOrCreate(['industry_name' => $industryName]);
+            } catch (\Illuminate\Database\QueryException $e) {
+                // This catches unique constraint violations
+                if ($e->errorInfo[1] == 1062) { // MySQL duplicate entry error code
+                    // Get the existing record
+                    $industry = Industry::where('industry_name', $industryName)->first();
+                    Log::warning("Duplicate industry attempted: " . $industryName);
+                } else {
+                    throw $e; // Re-throw if it's a different error
+                }
+            }
             
             $company = Company::updateOrCreate(
                 ['company_name' => $companyName],
