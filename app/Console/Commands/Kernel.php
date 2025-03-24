@@ -6,6 +6,7 @@ use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Foundation\Console\Kernel as ConsoleKernel;
 
 use App\Console\Commands\CrawlLinkedinData;
+use App\Console\Commands\ScrapeLinkedinWithSelenium;
 
 class Kernel extends ConsoleKernel
 {
@@ -35,6 +36,7 @@ class Kernel extends ConsoleKernel
         // Register custom commands
         $this->commands([
             CrawlLinkedinData::class,
+            ScrapelinkedinWithSelenium::class
         ]);
 
     }
