@@ -5,8 +5,7 @@ namespace App\Console;
 use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Foundation\Console\Kernel as ConsoleKernel;
 
-use App\Console\Commands\CrawlLinkedinData;
-use App\Console\Commands\ScrapeLinkedinWithSelenium;
+use App\Console\Commands\ScrapeLinkedInCompanies;
 
 class Kernel extends ConsoleKernel
 {
@@ -34,9 +33,8 @@ class Kernel extends ConsoleKernel
         require base_path('routes/console.php');
 
         // Register custom commands
-        $this->commands([
-            CrawlLinkedinData::class,
-            ScrapelinkedinWithSelenium::class
+        $this->commands([           
+            ScrapeLinkedInCompanies::class
         ]);
 
     }
