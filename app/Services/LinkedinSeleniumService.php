@@ -257,7 +257,7 @@ class LinkedinSeleniumService
     }
     
     /**
-     * Extract company data from the details page
+     * Modify extractCompanyData to store the jobs URL
      * 
      * @return array Company data including name, industry, employee count, etc.
      */
@@ -268,7 +268,8 @@ class LinkedinSeleniumService
             'industry' => 'Unknown',
             'employee_count' => null,
             'job_count' => 0,
-            'follower_count' => null
+            'follower_count' => null,
+            'jobs_url' => null // New field to store the jobs URL
         ];
         
         try {
@@ -355,19 +356,100 @@ class LinkedinSeleniumService
                 }
             }
             
-            // Get job count - might need to visit the jobs tab
-            $jobElements = $this->driver->findElements(
-                WebDriverBy::xpath("//a[contains(@href, '/jobs') and (contains(., 'job') or contains(., 'Job'))]")
-            );
-            
-            if (count($jobElements) > 0) {
-                $jobText = $jobElements[0]->getText();
-                // Look for numbers followed by "jobs"
-                preg_match('/([0-9,.]+)\s+jobs?/i', $jobText, $matches);
-                if (isset($matches[1])) {
-                    $companyData['job_count'] = (int)str_replace(',', '', $matches[1]);
-                    Log::info("Found job count from link text: " . $companyData['job_count']);
+            // Extract job count from search listing page and grab jobs URL
+            try {
+                // Look for the "jobs" link in the company page
+                $jobElements = $this->driver->findElements(
+                    WebDriverBy::xpath("//a[contains(@href, '/jobs/search/') or contains(@href, '/jobs?')]")
+                );
+                
+                if (count($jobElements) > 0) {
+                    foreach ($jobElements as $jobElement) {
+                        $jobText = $jobElement->getText();
+                        $href = $jobElement->getAttribute('href');
+                        
+                        // Look for text containing job count (e.g., "See all 6 jobs" or "6 jobs")
+                        if (preg_match('/(?:See all )?([0-9,.]+)\s+jobs?/i', $jobText, $matches)) {
+                            $companyData['job_count'] = (int)str_replace(',', '', $matches[1]);
+                            Log::info("Found job count from link text: " . $companyData['job_count']);
+                            
+                            // Store the jobs URL
+                            if (!empty($href) && (strpos($href, '/jobs/search') !== false || strpos($href, '/jobs?') !== false)) {
+                                $companyData['jobs_url'] = $href;
+                                Log::info("Stored jobs URL: " . $href);
+                            }
+                            break;
+                        }
+                    }
                 }
+                
+                // If job count is still 0 or jobs_url is still null, try to find it in the search results header
+                if ($companyData['job_count'] == 0 || $companyData['jobs_url'] == null) {
+                    // Extract company ID and create a jobs URL
+                    $companyUrl = $this->driver->getCurrentURL();
+                    $companyId = null;
+                    
+                    // Try to extract numeric company ID from URL
+                    if (preg_match('/\/company\/(\d+)/', $companyUrl, $matches)) {
+                        $companyId = $matches[1];
+                    } 
+                    // If not found in URL, try from page source
+                    else {
+                        $pageSource = $this->driver->getPageSource();
+                        if (preg_match('/companyId["\s:=]+(\d+)/', $pageSource, $matches)) {
+                            $companyId = $matches[1];
+                        }
+                    }
+                    
+                    if ($companyId) {
+                        // Create jobs URL with company ID
+                        $jobsUrl = "https://www.linkedin.com/jobs/search/?f_C={$companyId}&geoId=92000000";
+                        $companyData['jobs_url'] = $jobsUrl;
+                        Log::info("Created jobs URL from company ID: " . $jobsUrl);
+                        
+                        // Only navigate to check job count if we haven't found it yet
+                        if ($companyData['job_count'] == 0) {
+                            // Go to jobs page to check count
+                            $this->driver->get($jobsUrl);
+                            
+                            // Wait for the page to load
+                            $this->wait->until(
+                                WebDriverExpectedCondition::presenceOfElementLocated(
+                                    WebDriverBy::cssSelector('.scaffold-layout__list')
+                                )
+                            );
+                            
+                            // Look for job count in search results header
+                            $resultCountElements = $this->driver->findElements(
+                                WebDriverBy::xpath("//span[contains(text(), 'results')]")
+                            );
+                            
+                            foreach ($resultCountElements as $element) {
+                                $text = $element->getText();
+                                if (preg_match('/([0-9,]+)\s+results?/', $text, $matches)) {
+                                    $companyData['job_count'] = (int)str_replace(',', '', $matches[1]);
+                                    Log::info("Found job count from search results: " . $companyData['job_count']);
+                                    break;
+                                }
+                            }
+                            
+                            // Go back to company page
+                            $this->driver->navigate()->back();
+                        }
+                    }
+                }
+                
+                // If still no jobs URL but we have a company URL, create a fallback jobs URL
+                if ($companyData['jobs_url'] == null) {
+                    $companyUrl = $this->driver->getCurrentURL();
+                    if (!empty($companyUrl)) {
+                        $jobsUrl = rtrim($companyUrl, '/') . '/jobs/?viewAsMember=true';
+                        $companyData['jobs_url'] = $jobsUrl;
+                        Log::info("Created fallback jobs URL: " . $jobsUrl);
+                    }
+                }
+            } catch (\Exception $e) {
+                Log::warning("Error extracting job count and URL: " . $e->getMessage());
             }
         } catch (\Exception $e) {
             Log::error("Error extracting company data: " . $e->getMessage());
@@ -568,106 +650,565 @@ class LinkedinSeleniumService
     }
     
     /**
-     * Process job listings
+     * Process job listings for a company
+     * 
+     * @param Company $company The company model
+     * @return int Number of jobs processed
      */
     protected function processJobs($company)
     {
         try {
-            // Wait for the jobs page to load - look for job listings by their structure
-            $this->wait->until(
-                WebDriverExpectedCondition::presenceOfAllElementsLocatedBy(
-                    WebDriverBy::xpath('//div[contains(@class, "jobs-search") or contains(@class, "job-card")]')
-                )
-            );
+            // Get the company URL from the current window
+            $companyUrl = $this->driver->getCurrentURL();
+            $companyId = null;
+            $jobsUrl = null;
             
-            // Get job listings - more generic job list selector
-            $jobElements = $this->driver->findElements(
-                WebDriverBy::xpath('//li[.//a[contains(@href, "/jobs/view/")] or .//div[contains(@class, "job-card")]]')
-            );
-            
-            foreach ($jobElements as $element) {
-                try {
-                    $jobData = $this->extractJobData($element);
-                    
-                    if (!empty($jobData['title'])) {
-                        $this->saveJobData($company, $jobData);
-                    }
-                } catch (\Exception $e) {
-                    continue;
+            // Extract company ID from current URL
+            if (preg_match('/\/company\/(\d+)/', $companyUrl, $matches)) {
+                $companyId = $matches[1];
+                Log::info("Extracted company ID from URL: " . $companyId);
+            } else if (preg_match('/\/company\/([^\/]+)/', $companyUrl, $matches)) {
+                // If numeric ID not found, use the company name/slug
+                $companySlug = $matches[1];
+                Log::info("Extracted company slug from URL: " . $companySlug);
+                
+                // Try to get the company ID from the page source
+                $pageSource = $this->driver->getPageSource();
+                if (preg_match('/companyId":"(\d+)"/', $pageSource, $idMatches)) {
+                    $companyId = $idMatches[1];
+                    Log::info("Extracted company ID from page source: " . $companyId);
                 }
             }
+            
+            // If we have a company ID, construct a reliable search URL
+            if ($companyId) {
+                $jobsUrl = "https://www.linkedin.com/jobs/search/?f_C={$companyId}&geoId=92000000";
+                Log::info("Constructed jobs URL using company ID: " . $jobsUrl);
+            } else {
+                // Fallback to a simple jobs URL based on the company URL
+                $jobsUrl = rtrim($companyUrl, '/') . '/jobs/';
+                Log::info("Constructed fallback jobs URL: " . $jobsUrl);
+            }
+
+            // Try to click the "Show all jobs" link
+            $clickedShowAllJobs = $this->clickShowAllJobsLink();
+
+            // If clicking failed, fall back to direct URL navigation
+            if (!$clickedShowAllJobs) {
+                // Your fallback code using direct URL construction
+            }
+            
+            // Navigate to the jobs page
+            Log::info("Navigating to jobs URL: " . $jobsUrl);
+            $this->driver->get($jobsUrl);
+            
+            // Wait for the jobs page to load
+            try {
+                $this->wait->until(
+                    WebDriverExpectedCondition::presenceOfElementLocated(
+                        WebDriverBy::cssSelector('.jobs-search-results-list')
+                    )
+                );
+            } catch (\Exception $e) {
+                // Try alternative selector
+                try {
+                    $this->wait->until(
+                        WebDriverExpectedCondition::presenceOfElementLocated(
+                            WebDriverBy::cssSelector('.scaffold-layout__list')
+                        )
+                    );
+                } catch (\Exception $e2) {
+                    // One more alternative
+                    $this->wait->until(
+                        WebDriverExpectedCondition::presenceOfElementLocated(
+                            WebDriverBy::xpath("//div[contains(@class, 'jobs-search')]")
+                        )
+                    );
+                }
+            }
+            
+            // Allow time for the jobs list to fully load
+            sleep(3);
+            
+            // Take a screenshot for debugging if needed
+            // $this->driver->takeScreenshot('/path/to/jobs_page.png');
+            
+            // Find job listings
+            $jobElements = [];
+            
+            // Try multiple selectors to find job listings
+            $selectors = [
+                "//li[contains(@class, 'scaffold-layout__list-item')][.//div[contains(@class, 'job-card-container')]]",
+                "//div[contains(@class, 'job-card-container')]",
+                "//li[.//a[contains(@href, '/jobs/view/')]]",
+                "//a[contains(@href, '/jobs/view/')]"
+            ];
+            
+            foreach ($selectors as $selector) {
+                $jobElements = $this->driver->findElements(WebDriverBy::xpath($selector));
+                Log::info("Tried selector: {$selector} - Found: " . count($jobElements) . " elements");
+                if (count($jobElements) > 0) {
+                    break;
+                }
+            }
+            
+            // If still no elements found, log HTML for debugging
+            if (count($jobElements) == 0) {
+                Log::warning("No job elements found with any selector. Current URL: " . $this->driver->getCurrentURL());
+                // Log part of the page source for debugging
+                $source = $this->driver->getPageSource();
+                Log::debug("Page source excerpt: " . substr($source, 0, 2000) . "...");
+            }
+            
+            $jobsProcessed = 0;
+            
+            foreach ($jobElements as $index => $element) {
+                try {
+                    // Get job URL directly
+                    $jobUrl = null;
+                    try {
+                        // Try to get URL from element if it's an anchor
+                        if ($element->getTagName() == 'a') {
+                            $jobUrl = $element->getAttribute('href');
+                        } else {
+                            // Otherwise find the anchor inside the element
+                            $linkElement = $element->findElement(
+                                WebDriverBy::xpath(".//a[contains(@href, '/jobs/view/')]")
+                            );
+                            $jobUrl = $linkElement->getAttribute('href');
+                        }
+                    } catch (\Exception $e) {
+                        // If we can't get the URL, skip this job
+                        Log::warning("Could not get job URL: " . $e->getMessage());
+                        continue;
+                    }
+                    
+                    if (empty($jobUrl)) {
+                        continue;
+                    }
+                    
+                    Log::info("Processing job " . ($index + 1) . " with URL: " . $jobUrl);
+                    
+                    // Navigate directly to the job URL in a new tab
+                    $this->driver->executeScript("window.open(arguments[0], '_blank');", [$jobUrl]);
+                    
+                    // Switch to the new tab
+                    $tabs = $this->driver->getWindowHandles();
+                    $this->driver->switchTo()->window(end($tabs));
+                    
+                    // Wait for job details to load
+                    try {
+                        $this->wait->until(
+                            WebDriverExpectedCondition::presenceOfElementLocated(
+                                WebDriverBy::cssSelector('.job-view-layout, .jobs-details')
+                            )
+                        );
+                    } catch (\Exception $e) {
+                        // Try an alternative selector
+                        $this->wait->until(
+                            WebDriverExpectedCondition::presenceOfElementLocated(
+                                WebDriverBy::xpath("//div[contains(@class, 'jobs-')]")
+                            )
+                        );
+                    }
+                    
+                    sleep(2); // Give the page a moment to fully load
+                    
+                    // Extract data from the job details page
+                    $jobData = $this->extractJobDataFromDetailsPage();
+                    
+                    // Save the job data
+                    if (!empty($jobData['title'])) {
+                        $this->saveJobData($company, $jobData);
+                        $jobsProcessed++;
+                    }
+                    
+                    // Close the job details tab and switch back to the jobs list
+                    $tabs = $this->driver->getWindowHandles();
+                    if (count($tabs) > 1) {
+                        $this->driver->close();
+                        $this->driver->switchTo()->window($tabs[0]);
+                    }
+                    
+                    // Add a small delay between processing jobs
+                    sleep(rand(1, 3));
+                } catch (\Exception $e) {
+                    Log::warning("Error processing individual job: " . $e->getMessage());
+                    
+                    // Try to close any extra tabs and get back to the jobs list
+                    $tabs = $this->driver->getWindowHandles();
+                    if (count($tabs) > 1) {
+                        $this->driver->switchTo()->window(end($tabs));
+                        $this->driver->close();
+                        $this->driver->switchTo()->window($tabs[0]);
+                    }
+                    
+                    continue;
+                }
+                
+                // Process only a limited number of jobs to avoid long runtimes
+                if ($jobsProcessed >= 10) {
+                    Log::info("Reached limit of 10 jobs processed. Stopping job processing.");
+                    break;
+                }
+            }
+            
+            Log::info("Processed " . $jobsProcessed . " jobs for company: " . $company->company_name);
+            return $jobsProcessed;
         } catch (\Exception $e) {
             Log::warning("Error processing jobs for company {$company->company_name}: " . $e->getMessage());
+            return 0;
         }
     }
-    
+
     /**
-     * Extract job data from job card element
+     * Click or navigate to the jobs search link for a company
      * 
-     * @param \Facebook\WebDriver\Remote\RemoteWebElement $element
+     * @return bool True if successfully navigated to jobs page
+     */
+    protected function clickShowAllJobsLink()
+    {
+        try {
+            // First attempt: Look for the specific jobs link in the search results format
+            $jobsLinkSelectors = [
+                "//a[contains(@href, '/jobs/search?') and contains(@href, 'f_C=')]",
+                "//a[contains(@class, 'reusable-search-simple-insight__wrapping-link') and contains(@href, '/jobs/search')]",
+                "//a[contains(text(), 'jobs') and contains(@href, '/jobs/search')]"
+            ];
+            
+            foreach ($jobsLinkSelectors as $selector) {
+                $jobsLinkElements = $this->driver->findElements(WebDriverBy::xpath($selector));
+                
+                if (count($jobsLinkElements) > 0) {
+                    $href = $jobsLinkElements[0]->getAttribute('href');
+                    if (!empty($href)) {
+                        Log::info("Found jobs search link: " . $href);
+                        // Navigate directly to the href instead of clicking
+                        $this->driver->get($href);
+                        
+                        // Wait briefly for navigation
+                        sleep(2);
+                        
+                        // Verify we're on a jobs page
+                        $currentUrl = $this->driver->getCurrentURL();
+                        if (strpos($currentUrl, '/jobs/search') !== false) {
+                            Log::info("Successfully navigated to jobs search page: " . $currentUrl);
+                            return true;
+                        }
+                    }
+                }
+            }
+            
+            // Second attempt: Try to find the "Show all jobs" link on company page
+            $showAllJobsSelectors = [
+                "//a[contains(@class, 'org-jobs-recently-posted-jobs-module__show-all-jobs-btn-link')]",
+                "//a[contains(text(), 'Show all jobs')]",
+                "//a[contains(text(), 'See all') and contains(text(), 'jobs')]"
+            ];
+            
+            foreach ($showAllJobsSelectors as $selector) {
+                $showAllElements = $this->driver->findElements(WebDriverBy::xpath($selector));
+                
+                if (count($showAllElements) > 0) {
+                    $href = $showAllElements[0]->getAttribute('href');
+                    if (!empty($href)) {
+                        Log::info("Found 'Show all jobs' link: " . $href);
+                        // Navigate directly to the href instead of clicking
+                        $this->driver->get($href);
+                        
+                        // Wait briefly for navigation
+                        sleep(2);
+                        
+                        // Verify we're on a jobs page
+                        $currentUrl = $this->driver->getCurrentURL();
+                        if (strpos($currentUrl, '/jobs/search') !== false) {
+                            Log::info("Successfully navigated to jobs search page: " . $currentUrl);
+                            return true;
+                        }
+                    }
+                }
+            }
+            
+            // Third attempt: Extract company ID and construct jobs URL if available
+            $currentUrl = $this->driver->getCurrentURL();
+            $companyId = null;
+            
+            // Extract numeric company ID from URL if available
+            if (preg_match('/\/company\/(\d+)/', $currentUrl, $matches)) {
+                $companyId = $matches[1];
+            } 
+            // If not, try to extract it from page source
+            else {
+                $pageSource = $this->driver->getPageSource();
+                if (preg_match('/companyId["\s:=]+(\d+)/', $pageSource, $matches)) {
+                    $companyId = $matches[1];
+                }
+            }
+            
+            if ($companyId) {
+                $jobsUrl = "https://www.linkedin.com/jobs/search/?f_C={$companyId}&geoId=92000000";
+                Log::info("Constructed jobs URL using company ID: " . $jobsUrl);
+                $this->driver->get($jobsUrl);
+                
+                // Wait briefly for navigation
+                sleep(2);
+                
+                // Verify we're on a jobs page
+                $currentUrl = $this->driver->getCurrentURL();
+                if (strpos($currentUrl, '/jobs/search') !== false) {
+                    Log::info("Successfully navigated to jobs search page: " . $currentUrl);
+                    return true;
+                }
+            }
+            
+            Log::warning("Could not find or navigate to jobs search link");
+            return false;
+        } catch (\Exception $e) {
+            Log::error("Error trying to navigate to jobs search: " . $e->getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Extract job data directly from the job details page
+     * 
      * @return array Job data
      */
-    protected function extractJobData($element)
+    protected function extractJobDataFromDetailsPage()
     {
         $jobData = [
             'title' => '',
             'location' => '',
+            'url' => $this->driver->getCurrentURL(),
             'job_type' => 'Unknown',
             'time_type' => 'full_time',
+            'posted_date' => now()->format('Y-m-d'),
+            'description' => '',
             'applicant_count' => 0,
-            'url' => ''
+            'employment_type' => '',
+            'seniority_level' => '',
         ];
         
-        // Extract job title - look for headings or links to job posts
-        $titleElements = $element->findElements(
-            WebDriverBy::xpath('.//a[contains(@href, "/jobs/view/") or contains(@class, "job-title")] | .//h3')
-        );
-        
-        if (count($titleElements) > 0) {
-            $jobData['title'] = trim($titleElements[0]->getText());
-            $jobData['url'] = $titleElements[0]->getAttribute('href');
-        }
-        
-        // Extract location - typically in small text near the title
-        $locationElements = $element->findElements(
-            WebDriverBy::xpath('.//span[contains(@class, "location") or contains(@class, "metadata")]')
-        );
-        
-        if (count($locationElements) > 0) {
-            $jobData['location'] = trim($locationElements[0]->getText());
-        }
-        
-        // Extract job type - could be in different positions
-        $jobTypeElements = $element->findElements(
-            WebDriverBy::xpath('.//span[contains(text(), "Full-time") or contains(text(), "Part-time") or contains(text(), "Contract")]')
-        );
-        
-        if (count($jobTypeElements) > 0) {
-            $jobData['job_type'] = trim($jobTypeElements[0]->getText());
+        try {
+            // Extract job title
+            $titleElements = $this->driver->findElements(
+                WebDriverBy::xpath("//h1[contains(@class, 'job-title') or contains(@class, 'jobs-unified-top-card__job-title')]")
+            );
             
-            // Determine time type (full-time or part-time)
-            if (stripos($jobData['job_type'], 'part-time') !== false) {
+            if (count($titleElements) > 0) {
+                $jobData['title'] = trim($titleElements[0]->getText());
+                // Clean up the title text (remove "with verification" if present)
+                $jobData['title'] = preg_replace('/\s+with verification$/', '', $jobData['title']);
+                Log::info("Job title: " . $jobData['title']);
+            } else {
+                // Try alternative selector
+                $titleElements = $this->driver->findElements(
+                    WebDriverBy::cssSelector("h1, h2")
+                );
+                foreach ($titleElements as $element) {
+                    $text = trim($element->getText());
+                    if (strlen($text) > 5 && strlen($text) < 150) {
+                        $jobData['title'] = $text;
+                        Log::info("Job title (alternative): " . $jobData['title']);
+                        break;
+                    }
+                }
+            }
+            
+            // Extract location
+            $locationElements = $this->driver->findElements(
+                WebDriverBy::xpath("//span[contains(@class, 'location') or contains(@class, 'jobs-unified-top-card__bullet')]")
+            );
+            
+            if (count($locationElements) > 0) {
+                $locationText = trim($locationElements[0]->getText());
+                
+                // Parse location and work type (On-site/Hybrid/Remote)
+                if (preg_match('/(.*?)(?:\s+\((On-site|Hybrid|Remote)\))?$/', $locationText, $matches)) {
+                    $jobData['location'] = trim($matches[1]);
+                    if (isset($matches[2])) {
+                        $jobData['job_type'] = $matches[2];
+                    }
+                } else {
+                    $jobData['location'] = $locationText;
+                }
+                Log::info("Job location: " . $jobData['location']);
+            }
+            
+            // Extract posted date if available
+            $dateElements = $this->driver->findElements(
+                WebDriverBy::xpath("//span[contains(text(), 'Posted') or contains(text(), 'ago')]")
+            );
+            
+            foreach ($dateElements as $element) {
+                $dateText = trim($element->getText());
+                // Convert relative date to timestamp (e.g., "1 week ago", "2 days ago")
+                if (preg_match('/(?:Posted )?((\d+)\s+(day|week|month|hour)s?\s+ago)/', $dateText, $matches)) {
+                    $number = (int)$matches[2];
+                    $unit = $matches[3];
+                    
+                    $now = new \DateTime();
+                    switch ($unit) {
+                        case 'day':
+                            $now->sub(new \DateInterval("P{$number}D"));
+                            break;
+                        case 'week':
+                            $now->sub(new \DateInterval("P{$number}W"));
+                            break;
+                        case 'month':
+                            $now->sub(new \DateInterval("P{$number}M"));
+                            break;
+                        case 'hour':
+                            $now->sub(new \DateInterval("PT{$number}H"));
+                            break;
+                    }
+                    
+                    $jobData['posted_date'] = $now->format('Y-m-d');
+                    Log::info("Job posted date: " . $jobData['posted_date']);
+                    break;
+                }
+            }
+            
+            // Get job description
+            $descriptionElements = $this->driver->findElements(
+                WebDriverBy::xpath("//div[contains(@class, 'show-more-less-html') or contains(@class, 'jobs-description')]")
+            );
+            
+            if (count($descriptionElements) > 0) {
+                $jobData['description'] = trim($descriptionElements[0]->getText());
+                Log::info("Found job description: " . substr($jobData['description'], 0, 50) . "...");
+            }
+            
+            // Try to get applicant count
+            $applicantElements = $this->driver->findElements(
+                WebDriverBy::xpath("//span[contains(text(), 'applicant') or contains(text(), 'application')]")
+            );
+            
+            foreach ($applicantElements as $element) {
+                $text = $element->getText();
+                if (preg_match('/([0-9,]+)/', $text, $matches)) {
+                    $jobData['applicant_count'] = (int)str_replace(',', '', $matches[1]);
+                    Log::info("Job applicant count: " . $jobData['applicant_count']);
+                    break;
+                }
+            }
+            
+            // Get employment type and seniority level
+            $criteriaElements = $this->driver->findElements(
+                WebDriverBy::xpath("//li[contains(@class, 'job-criteria__item')]")
+            );
+            
+            foreach ($criteriaElements as $element) {
+                try {
+                    $labelElement = $element->findElement(WebDriverBy::xpath(".//h3"));
+                    $valueElement = $element->findElement(WebDriverBy::xpath(".//span"));
+                    
+                    $label = trim($labelElement->getText());
+                    $value = trim($valueElement->getText());
+                    
+                    if (stripos($label, 'employment type') !== false) {
+                        $jobData['employment_type'] = $value;
+                        Log::info("Job employment type: " . $value);
+                        
+                        // Set time_type based on employment type
+                        if (stripos($value, 'part-time') !== false || stripos($value, 'part time') !== false) {
+                            $jobData['time_type'] = 'part_time';
+                        } else if (stripos($value, 'full-time') !== false || stripos($value, 'full time') !== false) {
+                            $jobData['time_type'] = 'full_time';
+                        }
+                    } else if (stripos($label, 'seniority level') !== false) {
+                        $jobData['seniority_level'] = $value;
+                        Log::info("Job seniority level: " . $value);
+                    }
+                } catch (\Exception $e) {
+                    // Ignore errors in processing individual criteria
+                    continue;
+                }
+            }
+            
+            // Try to determine time_type from the title if not already set
+            if ($jobData['time_type'] == 'full_time' && 
+                (stripos($jobData['title'], 'part-time') !== false || stripos($jobData['title'], 'part time') !== false)) {
                 $jobData['time_type'] = 'part_time';
             }
-        }
-        
-        // Extract applicant count if available
-        $textNodes = $element->findElements(
-            WebDriverBy::xpath('.//*[contains(text(), "applicant") or contains(text(), "application")]')
-        );
-        
-        foreach ($textNodes as $node) {
-            $text = $node->getText();
-            preg_match('/([0-9,]+)/', $text, $matches);
-            if (isset($matches[1])) {
-                $jobData['applicant_count'] = (int) str_replace(',', '', $matches[1]);
-                break;
-            }
+            
+        } catch (\Exception $e) {
+            Log::warning("Error extracting job data from details page: " . $e->getMessage());
         }
         
         return $jobData;
     }
-    
+
+
+    /**
+     * Extract detailed job data from the job detail page
+     * 
+     * @return array Detailed job data
+     */
+    protected function extractDetailedJobData()
+    {
+        $detailedData = [
+            'description' => '',
+            'applicant_count' => 0,
+            'employment_type' => '',
+            'seniority_level' => '',
+        ];
+        
+        try {
+            // Get job description
+            $descriptionElements = $this->driver->findElements(
+                WebDriverBy::xpath("//div[contains(@class, 'show-more-less-html__markup')]")
+            );
+            
+            if (count($descriptionElements) > 0) {
+                $detailedData['description'] = trim($descriptionElements[0]->getText());
+            }
+            
+            // Try to get applicant count
+            $applicantElements = $this->driver->findElements(
+                WebDriverBy::xpath("//span[contains(text(), 'applicant') or contains(text(), 'application')]")
+            );
+            
+            foreach ($applicantElements as $element) {
+                $text = $element->getText();
+                if (preg_match('/([0-9,]+)/', $text, $matches)) {
+                    $detailedData['applicant_count'] = (int)str_replace(',', '', $matches[1]);
+                    break;
+                }
+            }
+            
+            // Get employment type and seniority level
+            $criteriaElements = $this->driver->findElements(
+                WebDriverBy::xpath("//li[contains(@class, 'job-criteria__item')]")
+            );
+            
+            foreach ($criteriaElements as $element) {
+                $labelElement = $element->findElement(WebDriverBy::xpath(".//h3"));
+                $valueElement = $element->findElement(WebDriverBy::xpath(".//span"));
+                
+                $label = trim($labelElement->getText());
+                $value = trim($valueElement->getText());
+                
+                if (stripos($label, 'employment type') !== false) {
+                    $detailedData['employment_type'] = $value;
+                    // Set time_type based on employment type
+                    if (stripos($value, 'part-time') !== false || stripos($value, 'part time') !== false) {
+                        $detailedData['time_type'] = 'part_time';
+                    } else if (stripos($value, 'full-time') !== false || stripos($value, 'full time') !== false) {
+                        $detailedData['time_type'] = 'full_time';
+                    }
+                } else if (stripos($label, 'seniority level') !== false) {
+                    $detailedData['seniority_level'] = $value;
+                }
+            }
+            
+        } catch (\Exception $e) {
+            Log::warning("Error extracting detailed job data: " . $e->getMessage());
+        }
+        
+        return $detailedData;
+    }
+
     /**
      * Save job data to database
      * 
@@ -678,8 +1219,24 @@ class LinkedinSeleniumService
     protected function saveJobData($company, $jobData)
     {
         try {
-            // Find or create job type
-            $jobType = JobType::firstOrCreate(['job_type' => $jobData['job_type']]);
+            // Find or create job type based on employment_type if available, otherwise use job_type
+            $jobTypeText = !empty($jobData['employment_type']) ? $jobData['employment_type'] : $jobData['job_type'];
+            $jobType = JobType::firstOrCreate(['job_type' => $jobTypeText]);
+            
+            // Prepare data for saving
+            $saveData = [
+                'location' => $jobData['location'],
+                'time_type' => $jobData['time_type'],
+                'number_of_applicants' => $jobData['applicant_count'] ?? 0,
+                'job_description_link' => $jobData['url'],
+            ];
+            
+            // Add open_date if available
+            if (!empty($jobData['posted_date'])) {
+                $saveData['open_date'] = $jobData['posted_date'];
+            } else {
+                $saveData['open_date'] = now();
+            }
             
             // Save the job
             $job = JobDetail::updateOrCreate(
@@ -687,13 +1244,7 @@ class LinkedinSeleniumService
                     'job_name' => $jobData['title'],
                     'job_type_id' => $jobType->id
                 ],
-                [
-                    'location' => $jobData['location'],
-                    'open_date' => now(),
-                    'time_type' => $jobData['time_type'],
-                    'number_of_applicants' => $jobData['applicant_count'],
-                    'job_description_link' => $jobData['url']
-                ]
+                $saveData
             );
             
             if ($job->wasRecentlyCreated) {
