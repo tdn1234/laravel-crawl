@@ -12,8 +12,7 @@ class WebDriverFactory
     protected $hubUrl;
     
     public function __construct(string $hubUrl = 'http://host.docker.internal:4444/wd/hub')
-    {
-        $this->chromeProfilePath = $chromeProfilePath;
+    {        
         $this->hubUrl = $hubUrl;
     }
     
