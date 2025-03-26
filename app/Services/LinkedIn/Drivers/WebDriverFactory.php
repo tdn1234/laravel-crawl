@@ -9,10 +9,9 @@ use Facebook\WebDriver\WebDriverWait;
 
 class WebDriverFactory
 {
-    protected $chromeProfilePath;
     protected $hubUrl;
     
-    public function __construct(string $chromeProfilePath = '/home/tdn/.config/google-chrome/Default', string $hubUrl = 'http://host.docker.internal:4444/wd/hub')
+    public function __construct(string $hubUrl = 'http://host.docker.internal:4444/wd/hub')
     {
         $this->chromeProfilePath = $chromeProfilePath;
         $this->hubUrl = $hubUrl;
@@ -35,8 +34,7 @@ class WebDriverFactory
         ]);
 
         // Use existing Chrome profile to maintain authentication
-        $options->addArguments([
-            'user-data-dir=' . $this->chromeProfilePath,
+        $options->addArguments([            
             'profile-directory=Default'
         ]);
         
